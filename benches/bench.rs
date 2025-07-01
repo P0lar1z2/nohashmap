@@ -1,14 +1,14 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex};
 
 use nohashmap::ConcurrentMap;
 
 const N: usize = 10_000_000;
-const THREADS: [usize; 5] = [4, 8, 12, 16, 32];
+const THREADS: [usize; 7] = [1, 2, 4, 8, 12, 16, 32];
 
 fn setup_map() -> Arc<ConcurrentMap<u64>> {
     let map = Arc::new(ConcurrentMap::new());
@@ -19,84 +19,6 @@ fn setup_map() -> Arc<ConcurrentMap<u64>> {
     map.write_done();
     println!("[BENCH] setup_map: done");
     map
-}
-
-// fn bench_concurrent_read(threads: usize, c: &mut Criterion) {
-//     println!("[BENCH] bench_concurrent_read: {} threads", threads);
-//     let map = setup_map(); // 只构建一次
-//     let mut group = c.benchmark_group(format!("read_{}threads", threads));
-//     group.sample_size(10);
-//     group.measurement_time(Duration::from_secs(10));
-//     group.bench_function("concurrent_read", |b| {
-//         b.iter(|| {
-//             // println!("[BENCH] iter: {} threads", threads);
-//             let mut handles = Vec::new();
-//             for t in 0..threads {
-//                 let map = map.clone();
-//                 handles.push(thread::spawn(move || {
-//                     let chunk = N / threads;
-//                     let start = t * chunk;
-//                     let end = if t == threads - 1 { N } else { (t + 1) * chunk };
-//                     map.read_init();
-//                     let mut sum = 0u64;
-//                     for i in start..end {
-//                         sum += map.get(i as u64, |v| v.copied().unwrap_or(0));
-//                     }
-//                     map.read_done();
-//                     sum
-//                 }));
-//             }
-//             let total: u64 = handles.into_iter().map(|h| h.join().unwrap()).sum();
-//             assert_eq!(total, (N as u64 - 1) * (N as u64) / 2);
-//         });
-//     });
-//     group.finish();
-// }
-
-fn bench_concurrent_read_count(threads: usize, c: &mut Criterion) {
-    println!("[BENCH] bench_concurrent_read_count: {} threads", threads);
-    let map = setup_map();
-    let mut group = c.benchmark_group(format!("read_count_{}threads", threads));
-    group.sample_size(10);
-    group.bench_function("concurrent_read_count", |b| {
-        b.iter_custom(|_duration| {
-            let running = Arc::new(AtomicBool::new(true));
-            let mut handles = Vec::new();
-            let counters: Vec<_> = (0..threads).map(|_| Arc::new(AtomicU64::new(0))).collect();
-            let start = Instant::now();
-            for t in 0..threads {
-                let map = map.clone();
-                let running = running.clone();
-                let counter = counters[t].clone();
-                handles.push(thread::spawn(move || {
-                    let mut idx = 1;
-                    map.read_init();
-                    while running.load(Ordering::Relaxed) {
-                        let i = idx as u64;
-                        let _ = map.get(i, |v| v.copied().unwrap_or(0));
-                        counter.fetch_add(1, Ordering::Relaxed);
-                        idx += 1;
-                        if idx >= N { idx = 1; }
-                    }
-                    map.read_done();
-                }));
-            }
-            // 运行10秒
-            std::thread::sleep(Duration::from_secs(10));
-            running.store(false, Ordering::Relaxed);
-            for h in handles { let _ = h.join(); }
-            let elapsed = start.elapsed();
-            let counts: Vec<u64> = counters.iter().map(|c| c.load(Ordering::Relaxed)).collect();
-            let total: u64 = counts.iter().sum();
-            for (i, c) in counts.iter().enumerate() {
-                println!("Thread {i}: {c} ops");
-            }
-            println!("Total: {total} ops in {:.2?} ({:.2} ops/s)", elapsed, total as f64 / elapsed.as_secs_f64());
-            // 返回 Criterion 需要的 Duration
-            elapsed
-        });
-    });
-    group.finish();
 }
 
 fn bench_concurrent_read_dataset(threads: usize, c: &mut Criterion) {
@@ -123,11 +45,21 @@ fn bench_concurrent_read_dataset(threads: usize, c: &mut Criterion) {
                     times[t] = elapsed.as_micros();
                 }));
             }
-            for h in handles { let _ = h.join(); }
-            let times = thread_times.lock().unwrap();
-            for (i, micros) in times.iter().enumerate() {
-                println!("Thread {i}: {:.3} ms", *micros as f64 / 1000.0);
+            for h in handles {
+                let _ = h.join();
             }
+            let times = thread_times.lock().unwrap();
+            
+            // 计算每个线程的QPS和总QPS
+            let mut total_qps = 0.0;
+            for (i, micros) in times.iter().enumerate() {
+                let seconds = *micros as f64 / 1_000_000.0; // 转换为秒
+                let thread_qps = (N - 1) as f64 / seconds; // 每个线程的QPS
+                total_qps += thread_qps;
+                println!("Thread {i}: {:.3} ms, QPS: {:.2}", *micros as f64 / 1000.0, thread_qps);
+            }
+            println!("Total QPS: {:.2}", total_qps);
+            
             // 返回最大耗时作为 Criterion 的采样
             let max = times.iter().max().copied().unwrap_or(0);
             Duration::from_micros(max as u64)
@@ -138,8 +70,6 @@ fn bench_concurrent_read_dataset(threads: usize, c: &mut Criterion) {
 
 pub fn criterion_benchmark(c: &mut Criterion) {
     for &threads in &THREADS {
-        // bench_concurrent_read(threads, c);
-        // bench_concurrent_read_count(threads, c);
         bench_concurrent_read_dataset(threads, c);
     }
 }

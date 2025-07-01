@@ -1,10 +1,10 @@
 use std::cell::UnsafeCell;
-use std::collections::HashMap;
-use std::sync::{Condvar};
-use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
+use std::hash::{BuildHasher, Hasher};
+use std::sync::Condvar;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 pub struct ConcurrentMap<V> {
-    map: UnsafeCell<HashMap<u64, V>>,
+    map: UnsafeCell<std::collections::HashMap<u64, V, NoHashBuilder>>,
     pub readers: AtomicUsize,       // 当前正在读的线程数
     pub write_pending: AtomicBool,  // 是否有写操作等待
     pub lock: std::sync::Mutex<()>, // 用于写等待所有读线程退出
@@ -17,7 +17,7 @@ unsafe impl<V: Send> Sync for ConcurrentMap<V> {}
 impl<V> ConcurrentMap<V> {
     pub fn new() -> Self {
         Self {
-            map: UnsafeCell::new(HashMap::new()),
+            map: UnsafeCell::new(std::collections::HashMap::with_hasher(NoHashBuilder)),
             readers: AtomicUsize::new(0),
             write_pending: AtomicBool::new(false),
             lock: std::sync::Mutex::new(()),
@@ -86,4 +86,47 @@ impl<V> ConcurrentMap<V> {
         let map = unsafe { &mut *self.map.get() };
         map.insert(key, value);
     }
-} 
+}
+
+// NoHashHasher: 直接用u64 key本身作为哈希值
+#[derive(Default, Clone)]
+pub struct NoHashHasher {
+    hash: u64,
+}
+
+impl Hasher for NoHashHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        // 只支持8字节key
+        if bytes.len() == 8 {
+            self.hash = u64::from_le_bytes(bytes.try_into().unwrap());
+        } else {
+            panic!("NoHashHasher 只支持8字节key");
+        }
+    }
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+}
+
+#[derive(Default, Clone)]
+pub struct NoHashBuilder;
+
+impl BuildHasher for NoHashBuilder {
+    type Hasher = NoHashHasher;
+    fn build_hasher(&self) -> Self::Hasher {
+        NoHashHasher::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_nohash_hasher_u64() {
+        let mut hasher = NoHashHasher::default();
+        let key: u64 = 0x1234_5678_9abc_def0;
+        hasher.write(&key.to_le_bytes());
+        assert_eq!(hasher.finish(), key);
+    }
+}
