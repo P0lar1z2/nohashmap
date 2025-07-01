@@ -1,0 +1,20 @@
+[package]
+name = "nohashmap"
+version = "0.1.0"
+edition = "2024"
+
+
+
+[profile.release]
+# rustflags = ["-C", "target-cpu=native"]
+codegen-units = 1
+lto = "fat"
+strip = "symbols"
+panic = "abort"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "bench"
+harness = false
